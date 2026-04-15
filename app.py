@@ -37,6 +37,14 @@ BLANK_STD_THRESHOLD = 10
 # Minimum fraction of edge pixels to consider the image as containing content.
 EDGE_DENSITY_THRESHOLD = 0.05
 
+# Shape-detection tuning constants
+MIN_CONTOUR_AREA_RATIO = 0.01   # ignore contours smaller than 1 % of image
+MAX_CONTOUR_AREA_RATIO = 0.95   # ignore contours larger than 95 % of image
+APPROX_POLY_EPSILON = 0.04      # polygon approximation tolerance (fraction of arc)
+SQUARE_ASPECT_MIN = 0.85        # aspect ratio range that counts as a square
+SQUARE_ASPECT_MAX = 1.15
+CIRCULARITY_THRESHOLD = 0.7     # minimum circularity to call a contour a circle
+
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
@@ -141,13 +149,13 @@ def _detect_shapes(gray: np.ndarray):
 
     for contour in contours:
         area = cv2.contourArea(contour)
-        if area < img_area * 0.01 or area > img_area * 0.95:
+        if area < img_area * MIN_CONTOUR_AREA_RATIO or area > img_area * MAX_CONTOUR_AREA_RATIO:
             continue
 
         perimeter = cv2.arcLength(contour, True)
         if perimeter == 0:
             continue
-        approx = cv2.approxPolyDP(contour, 0.04 * perimeter, True)
+        approx = cv2.approxPolyDP(contour, APPROX_POLY_EPSILON * perimeter, True)
         n_verts = len(approx)
 
         if n_verts == 3:
@@ -155,12 +163,12 @@ def _detect_shapes(gray: np.ndarray):
         elif n_verts == 4:
             x, y, w, h = cv2.boundingRect(approx)
             aspect = float(w) / h if h != 0 else 0
-            shapes_found.append("Square" if 0.85 <= aspect <= 1.15 else "Rectangle")
+            shapes_found.append("Square" if SQUARE_ASPECT_MIN <= aspect <= SQUARE_ASPECT_MAX else "Rectangle")
         elif n_verts == 5:
             shapes_found.append("Pentagon")
         elif n_verts > 6:
             circularity = 4 * np.pi * area / (perimeter * perimeter)
-            shapes_found.append("Circle" if circularity > 0.7 else "Object")
+            shapes_found.append("Circle" if circularity > CIRCULARITY_THRESHOLD else "Object")
 
     return shapes_found
 
