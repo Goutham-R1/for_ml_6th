@@ -13,6 +13,7 @@ The best-performing model (selected via cross-validation) is saved to
 ``model/saved_model.pkl`` and used for predictions on uploaded images.
 """
 
+import io
 import os
 import pickle
 import logging
@@ -102,7 +103,7 @@ def preprocess_image(image_bytes: bytes) -> np.ndarray:
         Shape ``(1, 4096)`` – ready to pass into ``best_pipeline.predict()``.
     """
     # Open image from raw bytes
-    pil_image = Image.open(__import__("io").BytesIO(image_bytes)).convert("L")
+    pil_image = Image.open(io.BytesIO(image_bytes)).convert("L")
 
     # Resize using OpenCV for high-quality interpolation
     img_array = np.array(pil_image, dtype=np.float64)
@@ -300,9 +301,9 @@ def api_predict():
             return jsonify({"error": "Uploaded file is empty."}), 400
 
         processed = preprocess_image(image_bytes)
-    except Exception as exc:
+    except Exception:
         logger.exception("Image preprocessing failed.")
-        return jsonify({"error": f"Could not process image: {exc}"}), 400
+        return jsonify({"error": "Could not process image. Please upload a valid image file."}), 400
 
     # ---- predict --------------------------------------------------------
     try:
@@ -334,9 +335,9 @@ def api_predict():
             "model_used": best_model_name,
             "message": f"Predicted as Person #{predicted_label}",
         })
-    except Exception as exc:
+    except Exception:
         logger.exception("Prediction failed.")
-        return jsonify({"error": f"Prediction failed: {exc}"}), 500
+        return jsonify({"error": "Prediction failed. Please try again with a different image."}), 500
 
 
 # ---------------------------------------------------------------------------
@@ -348,4 +349,6 @@ if __name__ == "__main__":
     load_or_train_model()
 
     logger.info("Starting Flask development server on http://localhost:5000")
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    # Set FLASK_DEBUG=1 in your environment to enable the interactive debugger.
+    debug_mode = os.environ.get("FLASK_DEBUG", "0") == "1"
+    app.run(host="0.0.0.0", port=5000, debug=debug_mode)
