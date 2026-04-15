@@ -1,12 +1,12 @@
 /**
- * Face Recognition System – Client-Side JavaScript
- * ==================================================
+ * Image Recognition System – Client-Side JavaScript
+ * ===================================================
  * Handles:
  *   • Image file selection and preview
  *   • Form submission via Fetch API (no page reload)
- *   • Loading spinner during prediction
- *   • Result / error display
- *   • Fetching model accuracy comparison from /api/models
+ *   • Loading spinner during analysis
+ *   • Result / error display (face, object, not-found)
+ *   • Fetching detection capabilities from /api/info
  *   • Dark-mode toggle
  *   • Webcam capture via getUserMedia
  */
@@ -14,32 +14,33 @@
 // ---------------------------------------------------------------------------
 // DOM references
 // ---------------------------------------------------------------------------
-const uploadForm        = document.getElementById("uploadForm");
-const imageInput        = document.getElementById("imageInput");
-const predictBtn        = document.getElementById("predictBtn");
-const previewContainer  = document.getElementById("previewContainer");
-const imagePreview      = document.getElementById("imagePreview");
+const uploadForm         = document.getElementById("uploadForm");
+const imageInput         = document.getElementById("imageInput");
+const predictBtn         = document.getElementById("predictBtn");
+const previewContainer   = document.getElementById("previewContainer");
+const imagePreview       = document.getElementById("imagePreview");
 
-const spinner           = document.getElementById("spinner");
-const resultSection     = document.getElementById("resultSection");
-const resultLabel       = document.getElementById("resultLabel");
-const resultConfidence  = document.getElementById("resultConfidence");
-const resultModel       = document.getElementById("resultModel");
-const errorSection      = document.getElementById("errorSection");
-const errorMessage      = document.getElementById("errorMessage");
+const spinner            = document.getElementById("spinner");
+const resultSection      = document.getElementById("resultSection");
+const resultAlert        = document.getElementById("resultAlert");
+const resultLabel        = document.getElementById("resultLabel");
+const resultConfidence   = document.getElementById("resultConfidence");
+const resultDetails      = document.getElementById("resultDetails");
+const errorSection       = document.getElementById("errorSection");
+const errorMessage       = document.getElementById("errorMessage");
 const placeholderSection = document.getElementById("placeholderSection");
 
-const accuracySpinner   = document.getElementById("accuracySpinner");
-const accuracySection   = document.getElementById("accuracySection");
-const accuracyBody      = document.getElementById("accuracyBody");
+const capabilitiesSpinner  = document.getElementById("capabilitiesSpinner");
+const capabilitiesSection  = document.getElementById("capabilitiesSection");
+const capabilitiesList     = document.getElementById("capabilitiesList");
 
-const darkModeToggle    = document.getElementById("darkModeToggle");
+const darkModeToggle     = document.getElementById("darkModeToggle");
 
-const startWebcamBtn    = document.getElementById("startWebcamBtn");
-const captureBtn        = document.getElementById("captureBtn");
-const webcamVideo       = document.getElementById("webcamVideo");
-const webcamCanvas      = document.getElementById("webcamCanvas");
-const webcamFallback    = document.getElementById("webcamFallback");
+const startWebcamBtn     = document.getElementById("startWebcamBtn");
+const captureBtn         = document.getElementById("captureBtn");
+const webcamVideo        = document.getElementById("webcamVideo");
+const webcamCanvas       = document.getElementById("webcamCanvas");
+const webcamFallback     = document.getElementById("webcamFallback");
 
 // Webcam stream reference so we can stop it later.
 let webcamStream = null;
@@ -127,22 +128,40 @@ function showSpinner() {
     placeholderSection.classList.add("d-none");
 }
 
+/**
+ * Choose an appropriate Bootstrap alert class based on the detection category.
+ */
+function alertClassForCategory(category) {
+    switch (category) {
+        case "human_face":    return "alert-success";
+        case "cat":           return "alert-info";
+        case "human_body":    return "alert-success";
+        case "shape":         return "alert-primary";
+        case "unknown_object": return "alert-warning";
+        case "nothing":       return "alert-secondary";
+        default:              return "alert-secondary";
+    }
+}
+
 function showResult(data) {
     spinner.classList.add("d-none");
     errorSection.classList.add("d-none");
     placeholderSection.classList.add("d-none");
     resultSection.classList.remove("d-none");
 
-    resultLabel.textContent = data.message || `Predicted: Person #${data.predicted_label}`;
+    // Set alert colour based on category
+    resultAlert.className = "alert " + alertClassForCategory(data.category);
 
-    if (data.confidence !== null && data.confidence !== undefined) {
+    resultLabel.textContent = data.message || data.label;
+
+    if (data.confidence !== null && data.confidence !== undefined && data.confidence > 0) {
         resultConfidence.textContent =
-            `Confidence: ${(data.confidence * 100).toFixed(2)}%`;
+            `Confidence: ${(data.confidence * 100).toFixed(1)}%`;
     } else {
-        resultConfidence.textContent = "Confidence: N/A";
+        resultConfidence.textContent = "";
     }
 
-    resultModel.textContent = `Model used: ${data.model_used}`;
+    resultDetails.textContent = data.details || "";
 }
 
 function showError(msg) {
@@ -154,56 +173,39 @@ function showError(msg) {
 }
 
 // ---------------------------------------------------------------------------
-// 4) Fetch model accuracy comparison on page load
+// 4) Fetch detection capabilities on page load
 // ---------------------------------------------------------------------------
 
-async function loadModelAccuracies() {
+async function loadCapabilities() {
     try {
-        const res = await fetch("/api/models");
+        const res = await fetch("/api/info");
         const data = await res.json();
 
-        accuracySpinner.classList.add("d-none");
-        accuracySection.classList.remove("d-none");
+        capabilitiesSpinner.classList.add("d-none");
+        capabilitiesSection.classList.remove("d-none");
 
-        // Build table rows
-        accuracyBody.innerHTML = "";
-        for (const [name, acc] of Object.entries(data.models)) {
-            const isBest = name === data.best_model;
-            const pct = (acc * 100).toFixed(2);
-
-            // Pick a colour for the progress bar
-            let barColor = "#6c757d";  // grey default
-            if (acc >= 0.95)      barColor = "#198754";  // green
-            else if (acc >= 0.85) barColor = "#0d6efd";  // blue
-            else if (acc >= 0.70) barColor = "#ffc107";  // yellow
-            else                  barColor = "#dc3545";  // red
-
-            const row = document.createElement("tr");
-            row.innerHTML = `
-                <td class="fw-semibold">
-                    ${name}
-                    ${isBest ? '<span class="badge badge-best ms-1">Best</span>' : ""}
-                </td>
-                <td>${pct}%</td>
-                <td style="min-width:120px">
-                    <div class="accuracy-bar">
-                        <div
-                            class="accuracy-bar-fill"
-                            style="width:${pct}%; background-color:${barColor}"
-                        ></div>
-                    </div>
-                </td>
+        capabilitiesList.innerHTML = "";
+        for (const cap of data.capabilities) {
+            const li = document.createElement("li");
+            li.className = "list-group-item d-flex align-items-start gap-2";
+            li.innerHTML = `
+                <i class="bi ${cap.icon} fs-5 text-primary mt-1"></i>
+                <div>
+                    <strong>${cap.name}</strong>
+                    <br/>
+                    <small class="text-muted">${cap.description}</small>
+                </div>
             `;
-            accuracyBody.appendChild(row);
+            capabilitiesList.appendChild(li);
         }
     } catch {
-        accuracySpinner.innerHTML =
-            '<small class="text-danger">Failed to load model data.</small>';
+        capabilitiesSpinner.innerHTML =
+            '<small class="text-danger">Failed to load capabilities.</small>';
     }
 }
 
-// Load accuracies as soon as the page is ready.
-document.addEventListener("DOMContentLoaded", loadModelAccuracies);
+// Load capabilities as soon as the page is ready.
+document.addEventListener("DOMContentLoaded", loadCapabilities);
 
 // ---------------------------------------------------------------------------
 // 5) Dark-mode toggle

@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Face Recognition System</title>
+    <title>Image Recognition System</title>
 
     <!-- Bootstrap 5 CDN -->
     <link
@@ -24,7 +24,7 @@
 <nav class="navbar navbar-expand-lg shadow-sm mb-4">
     <div class="container">
         <a class="navbar-brand fw-bold" href="/">
-            <i class="bi bi-person-bounding-box me-2"></i>Face Recognition ML
+            <i class="bi bi-eye me-2"></i>Image Recognition
         </a>
         <button
             id="darkModeToggle"
@@ -41,10 +41,11 @@
 
     <!-- Hero -->
     <div class="text-center mb-4">
-        <h1 class="display-5 fw-bold">Face Recognition System</h1>
+        <h1 class="display-5 fw-bold">Image Recognition System</h1>
         <p class="lead text-muted">
-            Upload an image or use your webcam to identify a person using
-            Machine Learning (Olivetti Faces dataset).
+            Upload an image or use your webcam &mdash; the system will tell you
+            if it&rsquo;s a <strong>human face</strong>, a <strong>common object / shape</strong>,
+            or show <em>&ldquo;not found&rdquo;</em> when nothing is recognised.
         </p>
     </div>
 
@@ -62,7 +63,7 @@
                     <form id="uploadForm" enctype="multipart/form-data">
                         <div class="mb-3">
                             <label for="imageInput" class="form-label">
-                                Choose a face image
+                                Choose an image
                             </label>
                             <input
                                 class="form-control"
@@ -92,7 +93,7 @@
                             class="btn btn-primary w-100"
                             disabled
                         >
-                            <i class="bi bi-cpu me-1"></i> Predict
+                            <i class="bi bi-cpu me-1"></i> Recognise
                         </button>
                     </form>
 
@@ -129,7 +130,7 @@
                                 class="btn btn-outline-primary flex-fill"
                                 disabled
                             >
-                                <i class="bi bi-camera me-1"></i> Capture &amp; Predict
+                                <i class="bi bi-camera me-1"></i> Capture &amp; Recognise
                             </button>
                         </div>
                     </div>
@@ -140,27 +141,27 @@
         <!-- ===== Right Column – Results ===== -->
         <div class="col-lg-6">
 
-            <!-- Prediction result card -->
+            <!-- Detection result card -->
             <div class="card shadow-sm mb-4">
                 <div class="card-body">
                     <h5 class="card-title">
-                        <i class="bi bi-graph-up me-1"></i> Prediction Result
+                        <i class="bi bi-search me-1"></i> Detection Result
                     </h5>
 
                     <!-- Spinner -->
                     <div id="spinner" class="text-center py-4 d-none">
                         <div class="spinner-border text-primary" role="status">
-                            <span class="visually-hidden">Predicting…</span>
+                            <span class="visually-hidden">Analysing…</span>
                         </div>
-                        <p class="mt-2 text-muted">Analyzing image…</p>
+                        <p class="mt-2 text-muted">Analysing image…</p>
                     </div>
 
                     <!-- Result content -->
                     <div id="resultSection" class="d-none">
-                        <div class="alert alert-success" id="resultAlert">
+                        <div class="alert" id="resultAlert">
                             <h6 class="alert-heading" id="resultLabel"></h6>
                             <p class="mb-1" id="resultConfidence"></p>
-                            <small class="text-muted" id="resultModel"></small>
+                            <small class="text-muted" id="resultDetails"></small>
                         </div>
                     </div>
 
@@ -175,37 +176,29 @@
                     <!-- Placeholder -->
                     <div id="placeholderSection">
                         <p class="text-muted text-center py-3">
-                            Upload an image or capture from webcam to see the
-                            prediction result here.
+                            Upload an image or capture from webcam to see what
+                            the system recognises.
                         </p>
                     </div>
                 </div>
             </div>
 
-            <!-- Model accuracy comparison card -->
+            <!-- Capabilities card -->
             <div class="card shadow-sm">
                 <div class="card-body">
                     <h5 class="card-title">
-                        <i class="bi bi-bar-chart-line me-1"></i> Model Accuracy Comparison
+                        <i class="bi bi-lightning-charge me-1"></i> Detection Capabilities
                     </h5>
-                    <div id="accuracySpinner" class="text-center py-3">
+                    <div id="capabilitiesSpinner" class="text-center py-3">
                         <div
                             class="spinner-border spinner-border-sm text-secondary"
                             role="status"
                         ></div>
-                        <small class="text-muted ms-2">Loading models…</small>
+                        <small class="text-muted ms-2">Loading…</small>
                     </div>
-                    <div id="accuracySection" class="d-none">
-                        <table class="table table-hover align-middle mb-0">
-                            <thead>
-                                <tr>
-                                    <th>Model</th>
-                                    <th>Accuracy</th>
-                                    <th></th>
-                                </tr>
-                            </thead>
-                            <tbody id="accuracyBody"></tbody>
-                        </table>
+                    <div id="capabilitiesSection" class="d-none">
+                        <ul class="list-group list-group-flush" id="capabilitiesList">
+                        </ul>
                     </div>
                 </div>
             </div>
@@ -216,7 +209,7 @@
 
 <!-- ===== Footer ===== -->
 <footer class="text-center py-3 mt-4 border-top text-muted small">
-    Face Recognition System &mdash; Built with Flask &amp; scikit-learn
+    Image Recognition System &mdash; Built with Flask &amp; OpenCV
 </footer>
 
 <!-- Bootstrap JS bundle (popper included) -->

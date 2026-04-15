@@ -1,33 +1,27 @@
 """
-Face Recognition System using Machine Learning
-================================================
-A beginner-friendly Flask web application that trains machine-learning models
-on the Olivetti Faces dataset and exposes REST endpoints for prediction.
+Image Recognition System
+=========================
+A beginner-friendly Flask web application that uses OpenCV to detect and
+identify content in uploaded images.
 
-Models compared:
-    - Gaussian Naive Bayes
-    - Support Vector Machine (SVM)
-    - K-Nearest Neighbors (KNN)
+Detection capabilities:
+    - Human Face detection  (OpenCV Haar Cascade)
+    - Cat Face detection    (OpenCV Haar Cascade)
+    - Human Body detection  (OpenCV Haar Cascade)
+    - Basic Shape detection (Circle, Rectangle, Triangle, etc.)
+    - Blank / empty image detection
 
-The best-performing model (selected via cross-validation) is saved to
-``model/saved_model.pkl`` and used for predictions on uploaded images.
+When a human face is found the app says *"It's a Human Face"*.
+When a common object or shape is found it reports the name.
+When nothing is recognisable it says *"Not found anything"*.
 """
 
 import io
 import os
-import pickle
 import logging
 
 import numpy as np
 from flask import Flask, render_template, request, jsonify
-from sklearn.datasets import fetch_olivetti_faces
-from sklearn.model_selection import cross_val_score
-from sklearn.decomposition import PCA
-from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import StandardScaler
-from sklearn.naive_bayes import GaussianNB
-from sklearn.svm import SVC
-from sklearn.neighbors import KNeighborsClassifier
 from PIL import Image
 import cv2  # opencv-python-headless
 
@@ -35,20 +29,21 @@ import cv2  # opencv-python-headless
 # Configuration
 # ---------------------------------------------------------------------------
 
-# Path where the trained model pipeline will be saved / loaded from.
-MODEL_PATH = os.path.join(os.path.dirname(__file__), "model", "saved_model.pkl")
-
-# Number of PCA components to keep during dimensionality reduction.
-N_PCA_COMPONENTS = 150
-
-# Number of cross-validation folds used when evaluating models.
-CV_FOLDS = 5
-
-# Olivetti face image dimensions (64×64 pixels).
-IMG_SIZE = 64
-
-# Allowed image extensions for uploads.
 ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg", "gif", "bmp", "webp"}
+
+# Minimum standard-deviation of pixel values to consider an image non-blank.
+BLANK_STD_THRESHOLD = 10
+
+# Minimum fraction of edge pixels to consider the image as containing content.
+EDGE_DENSITY_THRESHOLD = 0.05
+
+# Shape-detection tuning constants
+MIN_CONTOUR_AREA_RATIO = 0.01   # ignore contours smaller than 1 % of image
+MAX_CONTOUR_AREA_RATIO = 0.95   # ignore contours larger than 95 % of image
+APPROX_POLY_EPSILON = 0.04      # polygon approximation tolerance (fraction of arc)
+SQUARE_ASPECT_MIN = 0.85        # aspect ratio range that counts as a square
+SQUARE_ASPECT_MAX = 1.15
+CIRCULARITY_THRESHOLD = 0.7     # minimum circularity to call a contour a circle
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -61,21 +56,36 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Flask application factory
+# Flask application
 # ---------------------------------------------------------------------------
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024  # 16 MB upload limit
 
 # ---------------------------------------------------------------------------
-# Global state – populated by ``load_or_train_model()``
+# OpenCV Haar-Cascade classifiers (ship with opencv-python-headless)
 # ---------------------------------------------------------------------------
 
-best_pipeline = None          # sklearn Pipeline (scaler → PCA → classifier)
-model_accuracies = {}         # {"Gaussian Naive Bayes": 0.93, …}
-best_model_name = ""          # e.g. "SVM"
-dataset_labels = None         # Olivetti target labels (0–39)
-dataset_images = None         # Olivetti images (400, 4096)
+_cascade_dir = cv2.data.haarcascades
+
+face_cascade = cv2.CascadeClassifier(
+    os.path.join(_cascade_dir, "haarcascade_frontalface_default.xml")
+)
+face_cascade_alt = cv2.CascadeClassifier(
+    os.path.join(_cascade_dir, "haarcascade_frontalface_alt2.xml")
+)
+eye_cascade = cv2.CascadeClassifier(
+    os.path.join(_cascade_dir, "haarcascade_eye.xml")
+)
+cat_cascade = cv2.CascadeClassifier(
+    os.path.join(_cascade_dir, "haarcascade_frontalcatface_extended.xml")
+)
+body_cascade = cv2.CascadeClassifier(
+    os.path.join(_cascade_dir, "haarcascade_fullbody.xml")
+)
+upper_body_cascade = cv2.CascadeClassifier(
+    os.path.join(_cascade_dir, "haarcascade_upperbody.xml")
+)
 
 # ---------------------------------------------------------------------------
 # Helper utilities
@@ -83,154 +93,202 @@ dataset_images = None         # Olivetti images (400, 4096)
 
 
 def allowed_file(filename: str) -> bool:
-    """Return *True* if ``filename`` has an allowed image extension."""
+    """Return *True* if *filename* has an allowed image extension."""
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
 
 
-def preprocess_image(image_bytes: bytes) -> np.ndarray:
-    """Convert raw image bytes into the 1-D feature vector the model expects.
-
-    Steps
-    -----
-    1. Open with PIL and convert to grayscale (``"L"``).
-    2. Resize to 64×64 pixels (Olivetti face size).
-    3. Convert to a NumPy float array and normalize to [0, 1].
-    4. Flatten to a 1-D vector of length 4096.
-
-    Returns
-    -------
-    np.ndarray
-        Shape ``(1, 4096)`` – ready to pass into ``best_pipeline.predict()``.
-    """
-    # Open image from raw bytes
-    pil_image = Image.open(io.BytesIO(image_bytes)).convert("L")
-
-    # Resize using OpenCV for high-quality interpolation
-    img_array = np.array(pil_image, dtype=np.float64)
-    img_resized = cv2.resize(img_array, (IMG_SIZE, IMG_SIZE), interpolation=cv2.INTER_AREA)
-
-    # Normalize pixel values to [0, 1] (same as Olivetti dataset)
-    img_normalized = img_resized / 255.0
-
-    # Flatten to a 1-D vector and wrap in a 2-D array for sklearn
-    return img_normalized.flatten().reshape(1, -1)
-
-
 # ---------------------------------------------------------------------------
-# Model training & persistence
+# Detection helpers
 # ---------------------------------------------------------------------------
 
 
-def train_models():
-    """Train multiple ML models on the Olivetti Faces dataset.
-
-    Workflow
-    --------
-    1. Fetch the Olivetti Faces dataset (400 images of 40 people).
-    2. Normalize features and reduce dimensions with PCA.
-    3. Train Gaussian NB, SVM, and KNN using *k*-fold cross-validation.
-    4. Select the model with the highest mean CV accuracy.
-    5. Fit the winning pipeline on the full training set.
-    6. Save the pipeline to ``MODEL_PATH`` with :mod:`pickle`.
-
-    Returns
-    -------
-    tuple
-        ``(best_pipeline, model_accuracies, best_model_name, X, y)``
-    """
-    logger.info("Fetching Olivetti Faces dataset …")
-    data = fetch_olivetti_faces()
-    X, y = data.data, data.target  # X shape: (400, 4096), y shape: (400,)
-    logger.info("Dataset loaded: %d samples, %d features.", X.shape[0], X.shape[1])
-
-    # ------------------------------------------------------------------
-    # Define candidate models.  Each pipeline normalises the features,
-    # applies PCA, then feeds into the classifier.
-    # ------------------------------------------------------------------
-    candidates = {
-        "Gaussian Naive Bayes": GaussianNB(),
-        "SVM": SVC(kernel="rbf", probability=True, random_state=42),
-        "KNN": KNeighborsClassifier(n_neighbors=5),
-    }
-
-    accuracies = {}
-    best_score = -1.0
-    best_name = ""
-    best_pipe = None
-
-    for name, clf in candidates.items():
-        # Build a pipeline: StandardScaler → PCA → Classifier
-        pipe = Pipeline([
-            ("scaler", StandardScaler()),
-            ("pca", PCA(n_components=N_PCA_COMPONENTS, random_state=42)),
-            ("classifier", clf),
-        ])
-
-        # Evaluate with cross-validation
-        scores = cross_val_score(pipe, X, y, cv=CV_FOLDS, scoring="accuracy")
-        mean_acc = float(np.mean(scores))
-        accuracies[name] = round(mean_acc, 4)
-
-        logger.info(
-            "Model %-25s | CV accuracy: %.4f (±%.4f)",
-            name, mean_acc, float(np.std(scores)),
+def _detect_faces(gray: np.ndarray):
+    """Try two Haar cascades and return face rectangles."""
+    faces = face_cascade.detectMultiScale(
+        gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30)
+    )
+    if len(faces) == 0:
+        faces = face_cascade_alt.detectMultiScale(
+            gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30)
         )
-
-        # Track the best model
-        if mean_acc > best_score:
-            best_score = mean_acc
-            best_name = name
-            best_pipe = pipe
-
-    # ------------------------------------------------------------------
-    # Retrain the best pipeline on the *entire* dataset so the saved
-    # model has seen all available data.
-    # ------------------------------------------------------------------
-    logger.info("Best model: %s (%.4f). Training on full dataset …", best_name, best_score)
-    best_pipe.fit(X, y)
-
-    # ------------------------------------------------------------------
-    # Save to disk
-    # ------------------------------------------------------------------
-    os.makedirs(os.path.dirname(MODEL_PATH), exist_ok=True)
-    with open(MODEL_PATH, "wb") as f:
-        pickle.dump({
-            "pipeline": best_pipe,
-            "accuracies": accuracies,
-            "best_model": best_name,
-        }, f)
-    logger.info("Model saved to %s", MODEL_PATH)
-
-    return best_pipe, accuracies, best_name, X, y
+    return faces
 
 
-def load_or_train_model():
-    """Load a previously saved model or train from scratch if absent.
+def _detect_eyes(gray: np.ndarray):
+    return eye_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5)
 
-    This is called once at application startup.  It populates the module-level
-    globals ``best_pipeline``, ``model_accuracies``, ``best_model_name``,
-    ``dataset_images``, and ``dataset_labels``.
-    """
-    global best_pipeline, model_accuracies, best_model_name
-    global dataset_images, dataset_labels
 
-    if os.path.exists(MODEL_PATH):
-        logger.info("Loading saved model from %s …", MODEL_PATH)
-        with open(MODEL_PATH, "rb") as f:
-            saved = pickle.load(f)
-        best_pipeline = saved["pipeline"]
-        model_accuracies = saved["accuracies"]
-        best_model_name = saved["best_model"]
+def _detect_cats(gray: np.ndarray):
+    return cat_cascade.detectMultiScale(
+        gray, scaleFactor=1.1, minNeighbors=3, minSize=(30, 30)
+    )
 
-        # We still need the dataset reference for label count / metadata
-        data = fetch_olivetti_faces()
-        dataset_images, dataset_labels = data.data, data.target
-        logger.info("Model loaded successfully (%s).", best_model_name)
+
+def _detect_bodies(gray: np.ndarray):
+    bodies = body_cascade.detectMultiScale(
+        gray, scaleFactor=1.1, minNeighbors=3, minSize=(50, 50)
+    )
+    if len(bodies) == 0:
+        bodies = upper_body_cascade.detectMultiScale(
+            gray, scaleFactor=1.1, minNeighbors=3, minSize=(50, 50)
+        )
+    return bodies
+
+
+def _detect_shapes(gray: np.ndarray):
+    """Return a list of shape names found via contour analysis."""
+    shapes_found: list[str] = []
+
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    edges = cv2.Canny(blurred, 50, 150)
+    kernel = np.ones((3, 3), np.uint8)
+    dilated = cv2.dilate(edges, kernel, iterations=1)
+
+    contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    img_area = gray.shape[0] * gray.shape[1]
+
+    for contour in contours:
+        area = cv2.contourArea(contour)
+        if area < img_area * MIN_CONTOUR_AREA_RATIO or area > img_area * MAX_CONTOUR_AREA_RATIO:
+            continue
+
+        perimeter = cv2.arcLength(contour, True)
+        if perimeter == 0:
+            continue
+        approx = cv2.approxPolyDP(contour, APPROX_POLY_EPSILON * perimeter, True)
+        n_verts = len(approx)
+
+        if n_verts == 3:
+            shapes_found.append("Triangle")
+        elif n_verts == 4:
+            x, y, w, h = cv2.boundingRect(approx)
+            aspect = float(w) / h if h != 0 else 0
+            shapes_found.append("Square" if SQUARE_ASPECT_MIN <= aspect <= SQUARE_ASPECT_MAX else "Rectangle")
+        elif n_verts == 5:
+            shapes_found.append("Pentagon")
+        elif n_verts > 6:
+            circularity = 4 * np.pi * area / (perimeter * perimeter)
+            shapes_found.append("Circle" if circularity > CIRCULARITY_THRESHOLD else "Object")
+
+    return shapes_found
+
+
+def _is_blank(gray: np.ndarray) -> bool:
+    """An image is *blank* when pixel intensities barely vary."""
+    return float(np.std(gray)) < BLANK_STD_THRESHOLD
+
+
+# ---------------------------------------------------------------------------
+# Main analysis entry-point
+# ---------------------------------------------------------------------------
+
+
+def analyze_image(image_bytes: bytes) -> dict:
+    """Analyse raw image bytes and return a detection result dict."""
+    pil_image = Image.open(io.BytesIO(image_bytes))
+    img_array = np.array(pil_image)
+
+    # Convert to greyscale for all detectors
+    if len(img_array.shape) == 3:
+        gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
     else:
-        logger.info("No saved model found – training from scratch …")
-        best_pipeline, model_accuracies, best_model_name, dataset_images, dataset_labels = (
-            train_models()
-        )
+        gray = img_array
+
+    # ---- Blank check ---------------------------------------------------
+    if _is_blank(gray):
+        return {
+            "detected": False,
+            "category": "nothing",
+            "label": "Not Found",
+            "message": "Not found anything — the image appears to be blank or empty",
+            "confidence": 0.0,
+            "details": "No recognisable content detected in the image",
+        }
+
+    results: list[dict] = []
+
+    # 1. Human faces
+    faces = _detect_faces(gray)
+    if len(faces) > 0:
+        eyes = _detect_eyes(gray)
+        confidence = min(0.95, 0.70 + len(faces) * 0.10 + len(eyes) * 0.05)
+        count_text = f"{len(faces)} face(s)" if len(faces) > 1 else "a face"
+        eye_note = f" and {len(eyes)} eye(s)" if len(eyes) > 0 else ""
+        results.append({
+            "detected": True,
+            "category": "human_face",
+            "label": "Human Face",
+            "message": f"It's a Human Face! Detected {count_text} in the image",
+            "confidence": confidence,
+            "details": f"Found {len(faces)} human face(s){eye_note}",
+        })
+
+    # 2. Cat faces
+    cats = _detect_cats(gray)
+    if len(cats) > 0:
+        results.append({
+            "detected": True,
+            "category": "cat",
+            "label": "Cat",
+            "message": f"It's a Cat! Detected {len(cats)} cat face(s) in the image",
+            "confidence": 0.75,
+            "details": f"Found {len(cats)} cat face(s)",
+        })
+
+    # 3. Geometric shapes
+    shapes = _detect_shapes(gray)
+    if shapes and not results:
+        unique = sorted(set(shapes))
+        shape_names = ", ".join(unique)
+        results.append({
+            "detected": True,
+            "category": "shape",
+            "label": unique[0] if len(unique) == 1 else "Shapes",
+            "message": f"Detected shape(s): {shape_names}",
+            "confidence": 0.60,
+            "details": f"Found shapes: {shape_names}",
+        })
+
+    # 4. Human body (only when no face *and* no shape was found – the
+    #    body cascade is prone to false positives on simple shapes)
+    if not results and len(faces) == 0:
+        bodies = _detect_bodies(gray)
+        if len(bodies) > 0:
+            results.append({
+                "detected": True,
+                "category": "human_body",
+                "label": "Human Body",
+                "message": "Detected a human body / person in the image",
+                "confidence": 0.65,
+                "details": f"Found {len(bodies)} human body/bodies",
+            })
+
+    # 5. Generic content check via edge density
+    if not results:
+        edges = cv2.Canny(gray, 50, 150)
+        edge_density = float(np.sum(edges > 0)) / edges.size
+
+        if edge_density > EDGE_DENSITY_THRESHOLD:
+            results.append({
+                "detected": True,
+                "category": "unknown_object",
+                "label": "Unknown Object",
+                "message": "Object Detected — could not identify the specific object",
+                "confidence": 0.30,
+                "details": "The image contains content but it could not be specifically identified",
+            })
+        else:
+            results.append({
+                "detected": False,
+                "category": "nothing",
+                "label": "Not Found",
+                "message": "Not found anything — no recognisable objects in the image",
+                "confidence": 0.0,
+                "details": "The image does not contain any clearly recognisable objects",
+            })
+
+    # Return the highest-confidence hit
+    return max(results, key=lambda r: r["confidence"])
 
 
 # ---------------------------------------------------------------------------
@@ -244,30 +302,43 @@ def index():
     return render_template("index.html")
 
 
-@app.route("/api/models", methods=["GET"])
-def api_models():
-    """Return model accuracy comparison as JSON.
-
-    Response example::
-
-        {
-            "models": {
-                "Gaussian Naive Bayes": 0.8275,
-                "SVM": 0.9550,
-                "KNN": 0.9350
-            },
-            "best_model": "SVM"
-        }
-    """
+@app.route("/api/info", methods=["GET"])
+def api_info():
+    """Return the list of detection capabilities."""
     return jsonify({
-        "models": model_accuracies,
-        "best_model": best_model_name,
+        "capabilities": [
+            {
+                "name": "Human Face Detection",
+                "description": "Detects human faces using Haar Cascade classifier",
+                "icon": "bi-person-circle",
+            },
+            {
+                "name": "Cat Detection",
+                "description": "Detects cat faces in images",
+                "icon": "bi-heart-fill",
+            },
+            {
+                "name": "Human Body Detection",
+                "description": "Detects full or upper human body",
+                "icon": "bi-person-standing",
+            },
+            {
+                "name": "Shape Detection",
+                "description": "Identifies circles, rectangles, triangles, and more",
+                "icon": "bi-pentagon",
+            },
+            {
+                "name": "Blank Detection",
+                "description": "Identifies blank or empty images",
+                "icon": "bi-x-circle",
+            },
+        ]
     })
 
 
 @app.route("/api/predict", methods=["POST"])
 def api_predict():
-    """Accept an uploaded image and return the predicted person label + confidence.
+    """Accept an uploaded image and return what was detected.
 
     Expects
     -------
@@ -275,9 +346,9 @@ def api_predict():
 
     Returns
     -------
-    JSON with ``predicted_label``, ``confidence``, and ``model_used``.
-    On error returns a JSON body with an ``error`` key and an appropriate
-    HTTP status code.
+    JSON with ``label``, ``message``, ``confidence``, ``category``, and
+    ``details``.  On error a JSON body with an ``error`` key and an
+    appropriate HTTP status code.
     """
     # ---- validate upload ------------------------------------------------
     if "image" not in request.files:
@@ -294,50 +365,27 @@ def api_predict():
             )
         }), 400
 
-    # ---- preprocess -----------------------------------------------------
+    # ---- analyse --------------------------------------------------------
     try:
         image_bytes = file.read()
         if len(image_bytes) == 0:
             return jsonify({"error": "Uploaded file is empty."}), 400
 
-        processed = preprocess_image(image_bytes)
-    except Exception:
-        logger.exception("Image preprocessing failed.")
-        return jsonify({"error": "Could not process image. Please upload a valid image file."}), 400
-
-    # ---- predict --------------------------------------------------------
-    try:
-        predicted_label = int(best_pipeline.predict(processed)[0])
-
-        # Confidence score
-        classifier = best_pipeline.named_steps["classifier"]
-        if hasattr(classifier, "predict_proba"):
-            # Use predict_proba when available (SVM with probability=True, NB, KNN)
-            proba = best_pipeline.predict_proba(processed)[0]
-            confidence = float(np.max(proba))
-        elif hasattr(classifier, "decision_function"):
-            # Fallback: normalise the decision-function output to [0, 1]
-            decision = best_pipeline.decision_function(processed)[0]
-            # For multi-class SVM decision_function returns an array
-            if isinstance(decision, np.ndarray):
-                confidence = float(
-                    np.exp(np.max(decision)) / np.sum(np.exp(decision))
-                )
-            else:
-                confidence = float(1.0 / (1.0 + np.exp(-decision)))
-        else:
-            # Last resort – report a fixed placeholder
-            confidence = None
+        result = analyze_image(image_bytes)
 
         return jsonify({
-            "predicted_label": predicted_label,
-            "confidence": round(confidence, 4) if confidence is not None else None,
-            "model_used": best_model_name,
-            "message": f"Predicted as Person #{predicted_label}",
+            "detected": result["detected"],
+            "category": result["category"],
+            "label": result["label"],
+            "message": result["message"],
+            "confidence": round(result["confidence"], 4),
+            "details": result["details"],
         })
     except Exception:
-        logger.exception("Prediction failed.")
-        return jsonify({"error": "Prediction failed. Please try again with a different image."}), 500
+        logger.exception("Image analysis failed.")
+        return jsonify({
+            "error": "Could not analyse the image. Please try again with a different image."
+        }), 500
 
 
 # ---------------------------------------------------------------------------
@@ -345,10 +393,7 @@ def api_predict():
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    # Train / load model before the first request is served.
-    load_or_train_model()
-
-    logger.info("Starting Flask development server on http://localhost:5000")
+    logger.info("Starting Image Recognition System on http://localhost:5000")
     # Set FLASK_DEBUG=1 in your environment to enable the interactive debugger.
     debug_mode = os.environ.get("FLASK_DEBUG", "0") == "1"
     app.run(host="0.0.0.0", port=5000, debug=debug_mode)
