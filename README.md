@@ -1,10 +1,20 @@
-# Face Recognition System using Machine Learning
+# Image Recognition System
 
-A beginner-friendly web application that uses **scikit-learn** and **Flask** to
-recognise faces from the classic
-[Olivetti Faces](https://scikit-learn.org/stable/datasets/real_world.html#olivetti-faces)
-dataset.  Three models are trained and compared — the best one is automatically
-selected and served through a clean web UI.
+A beginner-friendly web application that uses **OpenCV** and **Flask** to
+detect and identify content in uploaded images.
+
+---
+
+## What It Does
+
+Upload any image (or capture from webcam) and the system will tell you:
+
+* **Human Face** → *"It's a Human Face!"*
+* **Cat** → *"It's a Cat!"*
+* **Human Body** → *"Detected a human body / person"*
+* **Shapes** (circle, rectangle, triangle, …) → the shape name
+* **Unknown Object** → *"Object Detected — could not identify the specific object"*
+* **Blank / Nothing** → *"Not found anything"*
 
 ---
 
@@ -12,12 +22,13 @@ selected and served through a clean web UI.
 
 | Category | Details |
 |----------|---------|
-| **ML Models** | Gaussian Naive Bayes, SVM (RBF kernel), K-Nearest Neighbors |
-| **Preprocessing** | StandardScaler normalisation → PCA (150 components) |
-| **Evaluation** | 5-fold cross-validation with accuracy comparison |
-| **Prediction** | Upload an image **or** capture from webcam → predicted person label + confidence score |
+| **Face Detection** | OpenCV Haar Cascade (frontal face, with eye verification) |
+| **Cat Detection** | OpenCV Haar Cascade (cat face) |
+| **Body Detection** | OpenCV Haar Cascade (full body + upper body) |
+| **Shape Detection** | Contour analysis for circles, rectangles, triangles, etc. |
+| **Blank Detection** | Low pixel-variance check for empty images |
 | **Dark Mode** | Toggle between light and dark themes |
-| **Auto-training** | Model is trained automatically on first run and saved to `model/saved_model.pkl` |
+| **Webcam** | Capture from webcam and analyse in real time |
 | **Error Handling** | Friendly JSON errors for invalid uploads and server issues |
 
 ---
@@ -26,11 +37,11 @@ selected and served through a clean web UI.
 
 ```
 for_ml_6th/
-├── app.py                  # Flask backend – training, API endpoints
+├── app.py                  # Flask backend – detection logic, API endpoints
 ├── requirements.txt        # Python dependencies
 ├── README.md               # This file
-├── model/
-│   └── saved_model.pkl     # Trained model pipeline (created at runtime)
+├── model/                  # (reserved for future use)
+│   └── .gitkeep
 ├── templates/
 │   └── index.html          # Main UI template
 └── static/
@@ -46,8 +57,6 @@ for_ml_6th/
 
 * **Python 3.9+** (3.10 or 3.11 recommended)
 * **pip** (comes with Python)
-* An internet connection for the first run (to download the Olivetti Faces
-  dataset from scikit-learn's servers)
 
 ### Steps
 
@@ -68,14 +77,6 @@ pip install -r requirements.txt
 python app.py
 ```
 
-On the **first run** the app will:
-
-1. Download the Olivetti Faces dataset (~2 MB).
-2. Train three models with cross-validation.
-3. Save the best model to `model/saved_model.pkl`.
-
-Subsequent runs load the saved model instantly.
-
 Open your browser at **<http://localhost:5000>** to use the app.
 
 ---
@@ -86,18 +87,19 @@ Open your browser at **<http://localhost:5000>** to use the app.
 
 Renders the main HTML UI.
 
-### `GET /api/models`
+### `GET /api/info`
 
-Returns model accuracy comparison.
+Returns the list of detection capabilities.
 
 ```json
 {
-    "models": {
-        "Gaussian Naive Bayes": 0.8275,
-        "SVM": 0.955,
-        "KNN": 0.935
-    },
-    "best_model": "SVM"
+    "capabilities": [
+        { "name": "Human Face Detection", "description": "Detects human faces using Haar Cascade classifier", "icon": "bi-person-circle" },
+        { "name": "Cat Detection",        "description": "Detects cat faces in images",                      "icon": "bi-heart-fill"    },
+        { "name": "Human Body Detection",  "description": "Detects full or upper human body",                 "icon": "bi-person-standing"},
+        { "name": "Shape Detection",       "description": "Identifies circles, rectangles, triangles, and more", "icon": "bi-pentagon"   },
+        { "name": "Blank Detection",       "description": "Identifies blank or empty images",                "icon": "bi-x-circle"      }
+    ]
 }
 ```
 
@@ -105,14 +107,29 @@ Returns model accuracy comparison.
 
 Accepts a `multipart/form-data` upload with field name **`image`**.
 
-**Success response:**
+**Success response (face detected):**
 
 ```json
 {
-    "predicted_label": 12,
-    "confidence": 0.9731,
-    "model_used": "SVM",
-    "message": "Predicted as Person #12"
+    "detected": true,
+    "category": "human_face",
+    "label": "Human Face",
+    "message": "It's a Human Face! Detected a face in the image",
+    "confidence": 0.85,
+    "details": "Found 1 human face(s) and 2 eye(s)"
+}
+```
+
+**Success response (nothing found):**
+
+```json
+{
+    "detected": false,
+    "category": "nothing",
+    "label": "Not Found",
+    "message": "Not found anything — no recognisable objects in the image",
+    "confidence": 0.0,
+    "details": "The image does not contain any clearly recognisable objects"
 }
 ```
 
@@ -131,8 +148,7 @@ Accepts a `multipart/form-data` upload with field name **`image`**.
 | Problem | Solution |
 |---------|----------|
 | **`ModuleNotFoundError`** | Make sure you ran `pip install -r requirements.txt` in the correct environment. |
-| **Dataset download fails** | Check your internet connection. scikit-learn downloads the Olivetti dataset from the web on first use. |
-| **Invalid image error** | Upload a standard image file (PNG, JPG, etc.). The image will be auto-resized to 64×64 grayscale. |
+| **Invalid image error** | Upload a standard image file (PNG, JPG, etc.). |
 | **Port 5000 already in use** | Change the port in `app.py` (`app.run(port=5001)`) or stop the other process. |
 | **Webcam not working** | Ensure you allow camera permissions in the browser prompt. HTTPS may be required on some browsers. |
 
@@ -143,10 +159,9 @@ Accepts a `multipart/form-data` upload with field name **`image`**.
 Listed in `requirements.txt`:
 
 * **Flask** – web framework
-* **scikit-learn** – ML models, PCA, cross-validation
 * **NumPy** – numerical operations
 * **Pillow** – image loading and conversion
-* **opencv-python-headless** – image resizing
+* **opencv-python-headless** – face/body/object detection via Haar Cascades
 
 ---
 
